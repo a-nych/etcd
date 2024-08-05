@@ -16,6 +16,7 @@ package robustness
 
 import (
 	"context"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -36,49 +37,52 @@ import (
 var testRunner = framework.E2eTestRunner
 
 func TestMain(m *testing.M) {
+	rand.Seed(time.Now().UnixNano())
 	testRunner.TestMain(m)
 }
 
 func TestRobustnessExploratory(t *testing.T) {
 	testRunner.BeforeTest(t)
-	for _, scenario := range exploratoryScenarios(t) {
-		t.Run(scenario.name, func(t *testing.T) {
+	for _, s := range exploratoryScenarios(t) {
+		t.Run(s.name, func(t *testing.T) {
 			lg := zaptest.NewLogger(t)
-			scenario.cluster.Logger = lg
+			s.cluster.Logger = lg
 			ctx := context.Background()
-			testRobustness(ctx, t, lg, scenario)
+			c, err := e2e.NewEtcdProcessCluster(ctx, t, e2e.WithConfig(&s.cluster))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer forcestopCluster(c)
+			s.failpoint, err = failpoint.PickRandom(c, s.profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Run(s.failpoint.Name(), func(t *testing.T) {
+				testRobustness(ctx, t, lg, s, c)
+			})
 		})
 	}
 }
 
 func TestRobustnessRegression(t *testing.T) {
 	testRunner.BeforeTest(t)
-	for _, scenario := range regressionScenarios(t) {
-		t.Run(scenario.name, func(t *testing.T) {
+	for _, s := range regressionScenarios(t) {
+		t.Run(s.name, func(t *testing.T) {
 			lg := zaptest.NewLogger(t)
-			scenario.cluster.Logger = lg
+			s.cluster.Logger = lg
 			ctx := context.Background()
-			testRobustness(ctx, t, lg, scenario)
+			c, err := e2e.NewEtcdProcessCluster(ctx, t, e2e.WithConfig(&s.cluster))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer forcestopCluster(c)
+			testRobustness(ctx, t, lg, s, c)
 		})
 	}
 }
 
-func testRobustness(ctx context.Context, t *testing.T, lg *zap.Logger, s testScenario) {
-	r := report.TestReport{Logger: lg}
-	var err error
-	r.Cluster, err = e2e.NewEtcdProcessCluster(ctx, t, e2e.WithConfig(&s.cluster))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer forcestopCluster(r.Cluster)
-
-	if s.failpoint == nil {
-		s.failpoint, err = failpoint.PickRandom(r.Cluster)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-
+func testRobustness(ctx context.Context, t *testing.T, lg *zap.Logger, s testScenario, c *e2e.EtcdProcessCluster) {
+	r := report.TestReport{Logger: lg, Cluster: c}
 	// t.Failed() returns false during panicking. We need to forcibly
 	// save data on panicking.
 	// Refer to: https://github.com/golang/go/issues/49929
@@ -86,14 +90,17 @@ func testRobustness(ctx context.Context, t *testing.T, lg *zap.Logger, s testSce
 	defer func() {
 		r.Report(t, panicked)
 	}()
-	r.Client = s.run(ctx, t, lg, r.Cluster)
-	persistedRequests, err := report.PersistedRequestsCluster(lg, r.Cluster)
+	r.Client = s.run(ctx, t, lg, c)
+	persistedRequests, err := report.PersistedRequestsCluster(lg, c)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	watchProgressNotifyEnabled := r.Cluster.Cfg.ServerConfig.ExperimentalWatchProgressNotifyInterval != 0
-	validateGotAtLeastOneProgressNotify(t, r.Client, s.watch.requestProgress || watchProgressNotifyEnabled)
+	failpointImpactingWatch := s.failpoint == failpoint.SleepBeforeSendWatchResponse
+	if !failpointImpactingWatch {
+		watchProgressNotifyEnabled := c.Cfg.ServerConfig.ExperimentalWatchProgressNotifyInterval != 0
+		validateGotAtLeastOneProgressNotify(t, r.Client, s.watch.requestProgress || watchProgressNotifyEnabled)
+	}
 	validateConfig := validate.Config{ExpectRevisionUnique: s.traffic.ExpectUniqueRevision()}
 	r.Visualize = validate.ValidateAndReturnVisualize(t, lg, validateConfig, r.Client, persistedRequests, 5*time.Minute)
 
@@ -105,7 +112,7 @@ func (s testScenario) run(ctx context.Context, t *testing.T, lg *zap.Logger, clu
 	defer cancel()
 	g := errgroup.Group{}
 	var operationReport, watchReport, failpointClientReport []report.ClientReport
-	failpointInjected := make(chan failpoint.Injection, 1)
+	failpointInjected := make(chan report.FailpointInjection, 1)
 
 	// using baseTime time-measuring operation to get monotonic clock reading
 	// see https://github.com/golang/go/blob/master/src/time/time.go#L17
@@ -123,7 +130,7 @@ func (s testScenario) run(ctx context.Context, t *testing.T, lg *zap.Logger, clu
 		// Give some time for traffic to reach qps target after injecting failpoint.
 		time.Sleep(time.Second)
 		if fr != nil {
-			failpointInjected <- fr.Injection
+			failpointInjected <- fr.FailpointInjection
 			failpointClientReport = fr.Client
 		}
 		return nil

@@ -4,13 +4,23 @@ Previous change logs can be found at [CHANGELOG-3.3](https://github.com/etcd-io/
 
 <hr>
 
-## v3.4.33 (TBD)
+## v3.4.34 (TBD)
+
+### Package clientv3
+- [Print gRPC metadata in guaranteed order using the official go fmt pkg](https://github.com/etcd-io/etcd/pull/18311).
+
+### Dependencies
+- Compile binaries using go [1.21.12](https://github.com/etcd-io/etcd/pull/18272).
+
+<hr>
+
+## v3.4.33 (2024-06-13)
 
 ### etcd grpc-proxy
 - Fix [Memberlist results not updated when proxy node down](https://github.com/etcd-io/etcd/pull/17896).
 
 ### Dependencies
-- Compile binaries using go [1.21.10](https://github.com/etcd-io/etcd/pull/17981).
+- Compile binaries using go [1.21.11](https://github.com/etcd-io/etcd/pull/18130).
 - Upgrade [bbolt to 1.3.10](https://github.com/etcd-io/etcd/pull/17945).
 
 <hr>

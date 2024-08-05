@@ -27,6 +27,7 @@ import (
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 	"go.etcd.io/etcd/tests/v3/robustness/identity"
 	"go.etcd.io/etcd/tests/v3/robustness/report"
+	"go.etcd.io/etcd/tests/v3/robustness/traffic"
 )
 
 var (
@@ -59,6 +60,7 @@ var (
 	BeforeApplyOneConfChangeSleep            Failpoint = killAndGofailSleep{"beforeApplyOneConfChange", time.Second}
 	RaftBeforeSaveSleep                      Failpoint = gofailSleepAndDeactivate{"raftBeforeSave", time.Second}
 	RaftAfterSaveSleep                       Failpoint = gofailSleepAndDeactivate{"raftAfterSave", time.Second}
+	SleepBeforeSendWatchResponse             Failpoint = gofailSleepAndDeactivate{"beforeSendWatchResponse", time.Second}
 )
 
 type goPanicFailpoint struct {
@@ -146,11 +148,11 @@ func (f goPanicFailpoint) pickMember(t *testing.T, clus *e2e.EtcdProcessCluster)
 	}
 }
 
-func (f goPanicFailpoint) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess) bool {
+func (f goPanicFailpoint) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess, profile traffic.Profile) bool {
 	if f.target == Follower && config.ClusterSize == 1 {
 		return false
 	}
-	if f.trigger != nil && !f.trigger.Available(config, member) {
+	if f.trigger != nil && !f.trigger.Available(config, member, profile) {
 		return false
 	}
 	memberFailpoints := member.Failpoints()
@@ -199,7 +201,7 @@ func (f killAndGofailSleep) Name() string {
 	return fmt.Sprintf("%s=sleep(%s)", f.failpoint, f.time)
 }
 
-func (f killAndGofailSleep) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess) bool {
+func (f killAndGofailSleep) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess, profile traffic.Profile) bool {
 	if config.ClusterSize == 1 {
 		return false
 	}
@@ -237,10 +239,7 @@ func (f gofailSleepAndDeactivate) Name() string {
 	return fmt.Sprintf("%s=sleep(%s)", f.failpoint, f.time)
 }
 
-func (f gofailSleepAndDeactivate) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess) bool {
-	if config.ClusterSize == 1 {
-		return false
-	}
+func (f gofailSleepAndDeactivate) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess, profile traffic.Profile) bool {
 	memberFailpoints := member.Failpoints()
 	if memberFailpoints == nil {
 		return false

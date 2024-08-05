@@ -25,6 +25,7 @@ import (
 	"go.etcd.io/etcd/tests/v3/robustness/client"
 	"go.etcd.io/etcd/tests/v3/robustness/identity"
 	"go.etcd.io/etcd/tests/v3/robustness/report"
+	"go.etcd.io/etcd/tests/v3/robustness/traffic"
 )
 
 type trigger interface {
@@ -41,13 +42,13 @@ func (t triggerDefrag) Trigger(ctx context.Context, _ *testing.T, member e2e.Etc
 	}
 	defer cc.Close()
 	_, err = cc.Defragment(ctx)
-	if err != nil && !strings.Contains(err.Error(), "error reading from server: EOF") {
+	if err != nil && !connectionError(err) {
 		return nil, err
 	}
 	return nil, nil
 }
 
-func (t triggerDefrag) Available(e2e.EtcdProcessClusterConfig, e2e.EtcdProcess) bool {
+func (t triggerDefrag) Available(e2e.EtcdProcessClusterConfig, e2e.EtcdProcess, traffic.Profile) bool {
 	return true
 }
 
@@ -68,7 +69,7 @@ func (t triggerCompact) Trigger(ctx context.Context, _ *testing.T, member e2e.Et
 	for {
 		_, rev, err = cc.Get(ctx, "/", 0)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to get revision: %w", err)
 		}
 
 		if !t.multiBatchCompaction || rev > int64(clus.Cfg.ServerConfig.ExperimentalCompactionBatchLimit) {
@@ -77,12 +78,29 @@ func (t triggerCompact) Trigger(ctx context.Context, _ *testing.T, member e2e.Et
 		time.Sleep(50 * time.Millisecond)
 	}
 	_, err = cc.Compact(ctx, rev)
-	if err != nil && !strings.Contains(err.Error(), "error reading from server: EOF") {
-		return nil, err
+	if err != nil && !connectionError(err) {
+		return nil, fmt.Errorf("failed to compact: %w", err)
 	}
 	return []report.ClientReport{cc.Report()}, nil
 }
 
-func (t triggerCompact) Available(e2e.EtcdProcessClusterConfig, e2e.EtcdProcess) bool {
+func (t triggerCompact) Available(config e2e.EtcdProcessClusterConfig, _ e2e.EtcdProcess, profile traffic.Profile) bool {
+	if profile.ForbidCompaction {
+		return false
+	}
+	// Since introduction of compaction into traffic, injecting compaction failpoints started interfeering with peer proxy.
+	// TODO: Re-enable the peer proxy for compact failpoints when we confirm the root cause.
+	if config.PeerProxy {
+		return false
+	}
+	// For multiBatchCompaction we need to guarantee that there are enough revisions between two compaction requests.
+	// With addition of compaction requests to traffic this might be hard if experimental-compaction-batch-limit is too high.
+	if t.multiBatchCompaction {
+		return config.ServerConfig.ExperimentalCompactionBatchLimit <= 10
+	}
 	return true
+}
+
+func connectionError(err error) bool {
+	return strings.Contains(err.Error(), "error reading from server: EOF") || strings.HasSuffix(err.Error(), "read: connection reset by peer")
 }

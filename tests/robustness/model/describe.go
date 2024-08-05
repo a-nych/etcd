@@ -25,8 +25,14 @@ func describeEtcdResponse(request EtcdRequest, response MaybeEtcdResponse) strin
 	if response.Error != "" {
 		return fmt.Sprintf("err: %q", response.Error)
 	}
-	if response.PartialResponse {
-		return fmt.Sprintf("unknown, rev: %d", response.Revision)
+	if response.ClientError != "" {
+		return fmt.Sprintf("err: %q", response.ClientError)
+	}
+	if response.Persisted {
+		if response.PersistedRevision != 0 {
+			return fmt.Sprintf("unknown, rev: %d", response.PersistedRevision)
+		}
+		return fmt.Sprintf("unknown")
 	}
 	switch request.Type {
 	case Range:
@@ -38,6 +44,8 @@ func describeEtcdResponse(request EtcdRequest, response MaybeEtcdResponse) strin
 			return "ok"
 		}
 		return fmt.Sprintf("ok, rev: %d", response.Revision)
+	case Compact:
+		return "ok"
 	default:
 		return fmt.Sprintf("<! unknown request type: %q !>", request.Type)
 	}
@@ -67,6 +75,8 @@ func describeEtcdRequest(request EtcdRequest) string {
 		return fmt.Sprintf("leaseRevoke(%d)", request.LeaseRevoke.LeaseID)
 	case Defragment:
 		return fmt.Sprintf("defragment()")
+	case Compact:
+		return fmt.Sprintf("compact(%d)", request.Compact.Revision)
 	default:
 		return fmt.Sprintf("<! unknown request type: %q !>", request.Type)
 	}

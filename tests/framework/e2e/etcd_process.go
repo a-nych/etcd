@@ -255,7 +255,11 @@ func (ep *EtcdServerProcess) Close() error {
 
 func (ep *EtcdServerProcess) waitReady(ctx context.Context) error {
 	defer close(ep.donec)
-	return WaitReadyExpectProc(ctx, ep.proc, EtcdServerReadyLines)
+	err := WaitReadyExpectProc(ctx, ep.proc, EtcdServerReadyLines)
+	if err != nil {
+		return fmt.Errorf("failed to find etcd ready lines %q, err: %w", EtcdServerReadyLines, err)
+	}
+	return nil
 }
 
 func (ep *EtcdServerProcess) Config() *EtcdServerProcessConfig { return ep.cfg }
@@ -396,8 +400,7 @@ func (f *BinaryFailpoints) DeactivateHTTP(ctx context.Context, failpoint string)
 		return err
 	}
 	httpClient := http.Client{
-		// TODO: Decrease after deactivate is not blocked by sleep https://github.com/etcd-io/gofail/issues/64
-		Timeout: 2 * time.Second,
+		Timeout: time.Second,
 	}
 	if f.clientTimeout != 0 {
 		httpClient.Timeout = f.clientTimeout
@@ -527,6 +530,6 @@ func CouldSetSnapshotCatchupEntries(execPath string) bool {
 		return false
 	}
 	// snapshot-catchup-entries flag was backported in https://github.com/etcd-io/etcd/pull/17808
-	v3_5_13 := semver.Version{Major: 3, Minor: 5, Patch: 13}
-	return v.Compare(v3_5_13) >= 0
+	v3_5_14 := semver.Version{Major: 3, Minor: 5, Patch: 14}
+	return v.Compare(v3_5_14) >= 0
 }

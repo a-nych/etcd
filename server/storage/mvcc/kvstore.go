@@ -106,7 +106,7 @@ func NewStore(lg *zap.Logger, b backend.Backend, le lease.Lessor, cfg StoreConfi
 
 		lg: lg,
 	}
-	s.hashes = newHashStorage(lg, s)
+	s.hashes = NewHashStorage(lg, s)
 	s.ReadView = &readView{s}
 	s.WriteView = &writeView{s}
 	if s.le != nil {
@@ -309,6 +309,7 @@ func (s *store) Restore(b backend.Backend) error {
 	return s.restore()
 }
 
+//nolint:unparam
 func (s *store) restore() error {
 	s.setupMetricsReporter()
 

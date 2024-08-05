@@ -4,7 +4,26 @@ Previous change logs can be found at [CHANGELOG-3.4](https://github.com/etcd-io/
 
 <hr>
 
-## v3.5.14 (TBD)
+## v3.5.16 (TBC)
+
+<hr>
+
+## v3.5.15 (2024-07-19)
+
+### etcd server
+- Fix [add prometheus metric registration for metric `etcd_disk_wal_write_duration_seconds`](https://github.com/etcd-io/etcd/pull/18174).
+- Add [Support multiple values for allowed client and peer TLS identities](https://github.com/etcd-io/etcd/pull/18160)
+- Fix [noisy logs from simple auth token expiration by reducing log level to debug](https://github.com/etcd-io/etcd/pull/18245)
+- [Differentiate the warning message for rejected client and peer connections](https://github.com/etcd-io/etcd/pull/18319)
+
+### Package clientv3
+- [Print gRPC metadata in guaranteed order using the official go fmt pkg](https://github.com/etcd-io/etcd/pull/18312).
+
+### Dependencies
+- Compile binaries using [go 1.21.12](https://github.com/etcd-io/etcd/pull/18271).
+- [Fully address CVE-2023-45288 and fix govulncheck CI check](https://github.com/etcd-io/etcd/pull/18170)
+
+## v3.5.14 (2024-05-29)
 
 ### etcd server
 - Fix [LeaseTimeToLive returns error if leader changed](https://github.com/etcd-io/etcd/pull/17704).

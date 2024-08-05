@@ -24,28 +24,34 @@ import (
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 	"go.etcd.io/etcd/tests/v3/robustness/failpoint"
 	"go.etcd.io/etcd/tests/v3/robustness/options"
+	"go.etcd.io/etcd/tests/v3/robustness/random"
 	"go.etcd.io/etcd/tests/v3/robustness/traffic"
 )
 
 type TrafficProfile struct {
+	Name    string
 	Traffic traffic.Traffic
 	Profile traffic.Profile
 }
 
 var trafficProfiles = []TrafficProfile{
 	{
+		Name:    "EtcdHighTraffic",
 		Traffic: traffic.EtcdPut,
 		Profile: traffic.HighTrafficProfile,
 	},
 	{
+		Name:    "EtcdTrafficDeleteLeases",
 		Traffic: traffic.EtcdPutDeleteLease,
 		Profile: traffic.LowTraffic,
 	},
 	{
+		Name:    "KubernetesHighTraffic",
 		Traffic: traffic.Kubernetes,
 		Profile: traffic.HighTrafficProfile,
 	},
 	{
+		Name:    "KubernetesLowTraffic",
 		Traffic: traffic.Kubernetes,
 		Profile: traffic.LowTraffic,
 	},
@@ -61,7 +67,6 @@ type testScenario struct {
 }
 
 func exploratoryScenarios(_ *testing.T) []testScenario {
-	enableLazyFS := e2e.BinPath.LazyFSAvailable()
 	randomizableOptions := []e2e.EPClusterOption{
 		options.WithClusterOptionGroups(
 			options.ClusterOptions{options.WithTickMs(29), options.WithElectionMs(271)},
@@ -69,29 +74,26 @@ func exploratoryScenarios(_ *testing.T) []testScenario {
 			options.ClusterOptions{options.WithTickMs(100), options.WithElectionMs(2000)}),
 	}
 
-	mixedVersionOption := options.WithClusterOptionGroups(
+	mixedVersionOptionChoices := []random.ChoiceWeight[options.ClusterOptions]{
 		// 60% with all members of current version
-		options.ClusterOptions{options.WithVersion(e2e.CurrentVersion)},
-		options.ClusterOptions{options.WithVersion(e2e.CurrentVersion)},
-		options.ClusterOptions{options.WithVersion(e2e.CurrentVersion)},
-		options.ClusterOptions{options.WithVersion(e2e.CurrentVersion)},
-		options.ClusterOptions{options.WithVersion(e2e.CurrentVersion)},
-		options.ClusterOptions{options.WithVersion(e2e.CurrentVersion)},
+		{Choice: options.ClusterOptions{options.WithVersion(e2e.CurrentVersion)}, Weight: 60},
 		// 10% with 2 members of current version, 1 member last version, leader is current version
-		options.ClusterOptions{options.WithVersion(e2e.MinorityLastVersion), options.WithInitialLeaderIndex(0)},
+		{Choice: options.ClusterOptions{options.WithVersion(e2e.MinorityLastVersion), options.WithInitialLeaderIndex(0)}, Weight: 10},
 		// 10% with 2 members of current version, 1 member last version, leader is last version
-		options.ClusterOptions{options.WithVersion(e2e.MinorityLastVersion), options.WithInitialLeaderIndex(2)},
+		{Choice: options.ClusterOptions{options.WithVersion(e2e.MinorityLastVersion), options.WithInitialLeaderIndex(2)}, Weight: 10},
 		// 10% with 2 members of last version, 1 member current version, leader is last version
-		options.ClusterOptions{options.WithVersion(e2e.QuorumLastVersion), options.WithInitialLeaderIndex(0)},
+		{Choice: options.ClusterOptions{options.WithVersion(e2e.QuorumLastVersion), options.WithInitialLeaderIndex(0)}, Weight: 10},
 		// 10% with 2 members of last version, 1 member current version, leader is current version
-		options.ClusterOptions{options.WithVersion(e2e.QuorumLastVersion), options.WithInitialLeaderIndex(2)},
-	)
+		{Choice: options.ClusterOptions{options.WithVersion(e2e.QuorumLastVersion), options.WithInitialLeaderIndex(2)}, Weight: 10},
+	}
+	mixedVersionOption := options.WithClusterOptionGroups(random.PickRandom[options.ClusterOptions](mixedVersionOptionChoices))
 
 	baseOptions := []e2e.EPClusterOption{
 		options.WithSnapshotCount(50, 100, 1000),
 		options.WithSubsetOptions(randomizableOptions...),
 		e2e.WithGoFailEnabled(true),
-		e2e.WithCompactionBatchLimit(100),
+		// Set low minimal compaction batch limit to allow for triggering multi batch compaction failpoints.
+		options.WithCompactionBatchLimit(10, 100, 1000),
 		e2e.WithWatchProcessNotifyInterval(100 * time.Millisecond),
 	}
 
@@ -100,14 +102,9 @@ func exploratoryScenarios(_ *testing.T) []testScenario {
 	}
 	scenarios := []testScenario{}
 	for _, tp := range trafficProfiles {
-		name := filepath.Join(tp.Traffic.Name(), tp.Profile.Name, "ClusterOfSize1")
+		name := filepath.Join(tp.Name, "ClusterOfSize1")
 		clusterOfSize1Options := baseOptions
 		clusterOfSize1Options = append(clusterOfSize1Options, e2e.WithClusterSize(1))
-		// Add LazyFS only for traffic with lower QPS as it uses a lot of CPU lowering minimal QPS.
-		if enableLazyFS && tp.Profile.MinimalQPS <= 100 {
-			clusterOfSize1Options = append(clusterOfSize1Options, e2e.WithLazyFSEnabled(true))
-			name = filepath.Join(name, "LazyFS")
-		}
 		scenarios = append(scenarios, testScenario{
 			name:    name,
 			traffic: tp.Traffic,
@@ -117,7 +114,7 @@ func exploratoryScenarios(_ *testing.T) []testScenario {
 	}
 
 	for _, tp := range trafficProfiles {
-		name := filepath.Join(tp.Traffic.Name(), tp.Profile.Name, "ClusterOfSize3")
+		name := filepath.Join(tp.Name, "ClusterOfSize3")
 		clusterOfSize3Options := baseOptions
 		clusterOfSize3Options = append(clusterOfSize3Options, e2e.WithIsPeerTLS(true))
 		clusterOfSize3Options = append(clusterOfSize3Options, e2e.WithPeerProxy(true))
@@ -130,6 +127,25 @@ func exploratoryScenarios(_ *testing.T) []testScenario {
 			profile: tp.Profile,
 			cluster: *e2e.NewConfig(clusterOfSize3Options...),
 		})
+	}
+	if e2e.BinPath.LazyFSAvailable() {
+		newScenarios := scenarios
+		for _, s := range scenarios {
+			// LazyFS increases the load on CPU, so we run it with more lightweight case.
+			if s.profile.MinimalQPS <= 100 && s.cluster.ClusterSize == 1 {
+				lazyfsCluster := s.cluster
+				lazyfsCluster.LazyFSEnabled = true
+				newScenarios = append(newScenarios, testScenario{
+					name:      filepath.Join(s.name, "LazyFS"),
+					failpoint: s.failpoint,
+					cluster:   lazyfsCluster,
+					traffic:   s.traffic,
+					profile:   s.profile.WithoutCompaction(),
+					watch:     s.watch,
+				})
+			}
+		}
+		scenarios = newScenarios
 	}
 	return scenarios
 }
@@ -175,10 +191,22 @@ func regressionScenarios(t *testing.T) []testScenario {
 		watch: watchConfig{
 			requestProgress: true,
 		},
-		profile: traffic.LowTraffic,
-		traffic: traffic.EtcdPutDeleteLease,
+		profile:   traffic.LowTraffic,
+		traffic:   traffic.EtcdPutDeleteLease,
+		failpoint: failpoint.KillFailpoint,
 		cluster: *e2e.NewConfig(
 			e2e.WithClusterSize(1),
+		),
+	})
+	scenarios = append(scenarios, testScenario{
+		name:      "Issue17529",
+		profile:   traffic.HighTrafficProfile,
+		traffic:   traffic.Kubernetes,
+		failpoint: failpoint.SleepBeforeSendWatchResponse,
+		cluster: *e2e.NewConfig(
+			e2e.WithClusterSize(1),
+			e2e.WithGoFailEnabled(true),
+			options.WithSnapshotCount(100),
 		),
 	})
 	if v.Compare(version.V3_5) >= 0 {

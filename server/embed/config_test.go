@@ -31,6 +31,8 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/srv"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/pkg/v3/featuregate"
+	"go.etcd.io/etcd/server/v3/features"
 )
 
 func notFoundErr(service, domain string) error {
@@ -41,7 +43,7 @@ func notFoundErr(service, domain string) error {
 func TestConfigFileOtherFields(t *testing.T) {
 	ctls := securityConfig{TrustedCAFile: "cca", CertFile: "ccert", KeyFile: "ckey"}
 	// Note AllowedCN and AllowedHostname are mutually exclusive, this test is just to verify the fields can be correctly marshalled & unmarshalled.
-	ptls := securityConfig{TrustedCAFile: "pca", CertFile: "pcert", KeyFile: "pkey", AllowedCN: "etcd", AllowedHostname: "whatever.example.com"}
+	ptls := securityConfig{TrustedCAFile: "pca", CertFile: "pcert", KeyFile: "pkey", AllowedCNs: []string{"etcd"}, AllowedHostnames: []string{"whatever.example.com"}}
 	yc := struct {
 		ClientSecurityCfgFile securityConfig       `json:"client-transport-security"`
 		PeerSecurityCfgFile   securityConfig       `json:"peer-transport-security"`
@@ -87,6 +89,78 @@ func TestConfigFileOtherFields(t *testing.T) {
 	assert.Equal(t, true, cfg.SocketOpts.ReusePort, "ReusePort does not match")
 
 	assert.Equal(t, false, cfg.SocketOpts.ReuseAddress, "ReuseAddress does not match")
+}
+
+func TestConfigFileFeatureGates(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		serverFeatureGatesJSON string
+		expectErr              bool
+		expectedFeatures       map[featuregate.Feature]bool
+	}{
+		{
+			name: "default",
+			expectedFeatures: map[featuregate.Feature]bool{
+				features.DistributedTracing:      false,
+				features.StopGRPCServiceOnDefrag: false,
+			},
+		},
+		{
+			name:                   "set StopGRPCServiceOnDefrag to true",
+			serverFeatureGatesJSON: "StopGRPCServiceOnDefrag=true",
+			expectedFeatures: map[featuregate.Feature]bool{
+				features.DistributedTracing:      false,
+				features.StopGRPCServiceOnDefrag: true,
+			},
+		},
+		{
+			name:                   "set both features to true",
+			serverFeatureGatesJSON: "DistributedTracing=true,StopGRPCServiceOnDefrag=true",
+			expectedFeatures: map[featuregate.Feature]bool{
+				features.DistributedTracing:      true,
+				features.StopGRPCServiceOnDefrag: true,
+			},
+		},
+		{
+			name:                   "error setting unrecognized feature",
+			serverFeatureGatesJSON: "DistributedTracing=true,StopGRPCServiceOnDefragExp=true",
+			expectErr:              true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			yc := struct {
+				ExperimentalStopGRPCServiceOnDefrag *bool  `json:"experimental-stop-grpc-service-on-defrag,omitempty"`
+				ServerFeatureGatesJSON              string `json:"feature-gates"`
+			}{
+				ServerFeatureGatesJSON: tc.serverFeatureGatesJSON,
+			}
+
+			b, err := yaml.Marshal(&yc)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			tmpfile := mustCreateCfgFile(t, b)
+			defer os.Remove(tmpfile.Name())
+
+			cfg, err := ConfigFromFile(tmpfile.Name())
+			if tc.expectErr {
+				if err == nil {
+					t.Fatal("expect parse error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range tc.expectedFeatures {
+				if cfg.ServerFeatureGate.Enabled(k) != v {
+					t.Errorf("expected feature gate %s=%v, got %v", k, v, cfg.ServerFeatureGate.Enabled(k))
+				}
+			}
+		})
+	}
 }
 
 // TestUpdateDefaultClusterFromName ensures that etcd can start with 'etcd --name=abc'.
@@ -292,8 +366,20 @@ func (s *securityConfig) equals(t *transport.TLSInfo) bool {
 		s.ClientCertFile == t.ClientCertFile &&
 		s.ClientKeyFile == t.ClientKeyFile &&
 		s.KeyFile == t.KeyFile &&
-		s.AllowedCN == t.AllowedCN &&
-		s.AllowedHostname == t.AllowedHostname
+		compareSlices(s.AllowedCNs, t.AllowedCNs) &&
+		compareSlices(s.AllowedHostnames, t.AllowedHostnames)
+}
+
+func compareSlices(slice1, slice2 []string) bool {
+	if len(slice1) != len(slice2) {
+		return false
+	}
+	for i, v := range slice1 {
+		if v != slice2[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func mustCreateCfgFile(t *testing.T, b []byte) *os.File {

@@ -60,7 +60,8 @@ fi
 PASSES=${PASSES:-"gofmt bom dep build unit"}
 KEEP_GOING_SUITE=${KEEP_GOING_SUITE:-false}
 PKG=${PKG:-}
-SHELLCHECK_VERSION=${SHELLCHECK_VERSION:-"v0.8.0"}
+SHELLCHECK_VERSION=${SHELLCHECK_VERSION:-"v0.10.0"}
+MARKDOWN_MARKER_VERSION=${MARKDOWN_MARKER_VERSION:="v0.10.0"}
 
 if [ -z "${GOARCH:-}" ]; then
   GOARCH=$(go env GOARCH);
@@ -260,6 +261,7 @@ function merge_cov {
   merge_cov_files "${coverdir}" "${coverdir}/all.coverprofile"
 }
 
+# https://docs.codecov.com/docs/unexpected-coverage-changes#reasons-for-indirect-changes
 function cov_pass {
   # shellcheck disable=SC2153
   if [ -z "${COVERDIR:-}" ]; then
@@ -359,10 +361,21 @@ function shellws_pass {
 }
 
 function markdown_marker_pass {
+  local marker="marker"
   # TODO: check other markdown files when marker handles headers with '[]'
-  if tool_exists "marker" "https://crates.io/crates/marker"; then
-    generic_checker run marker --skip-http --allow-absolute-paths --root "${ETCD_ROOT_DIR}" -e ./CHANGELOG -e ./etcdctl -e etcdutl -e ./tools 2>&1
+  if ! tool_exists "$marker" "https://crates.io/crates/marker"; then
+    log_callout "Installing markdown marker $MARKDOWN_MARKER_VERSION"
+    wget -qO- "https://github.com/crawford/marker/releases/download/${MARKDOWN_MARKER_VERSION}/marker-${MARKDOWN_MARKER_VERSION}-x86_64-unknown-linux-musl.tar.gz" | tar -xzv -C /tmp/ --strip-components=1 >/dev/null
+    mkdir -p ./bin
+    mv /tmp/marker ./bin/
+    marker=./bin/marker
   fi
+
+  generic_checker run "${marker}" --skip-http --allow-absolute-paths --root "${ETCD_ROOT_DIR}" -e ./CHANGELOG -e ./etcdctl -e etcdutl -e ./tools 2>&1
+}
+
+function govuln_pass {
+  run_for_modules run govulncheck -show verbose
 }
 
 function govet_pass {
@@ -530,20 +543,27 @@ function dump_deps_of_module() {
   if ! module=$(run go list -m); then
     return 255
   fi
-  run go list -f "{{if not .Indirect}}{{if .Version}}{{.Path}},{{.Version}},${module}{{end}}{{end}}" -m all
+  run go mod edit -json | jq -r '.Require[] | .Path+","+.Version+","+if .Indirect then " (indirect)" else "" end+",'"${module}"'"'
 }
 
 # Checks whether dependencies are consistent across modules
 function dep_pass {
   local all_dependencies
+  local tools_mod_dependencies
   all_dependencies=$(run_for_modules dump_deps_of_module | sort) || return 2
+  # tools/mod is a special case. It is a module that is not included in the
+  # module list from test_lib.sh. However, we need to ensure that the
+  # dependency versions match the rest of the project. Therefore, explicitly
+  # execute the command for tools/mod, and append its dependencies to the list.
+  tools_mod_dependencies=$(run_for_module "tools/mod" dump_deps_of_module "./...") || return 2
+  all_dependencies="${all_dependencies}"$'\n'"${tools_mod_dependencies}"
 
   local duplicates
   duplicates=$(echo "${all_dependencies}" | cut -d ',' -f 1,2 | sort | uniq | cut -d ',' -f 1 | sort | uniq -d) || return 2
 
   for dup in ${duplicates}; do
     log_error "FAIL: inconsistent versions for dependency: ${dup}"
-    echo "${all_dependencies}" | grep "${dup}" | sed "s|\\([^,]*\\),\\([^,]*\\),\\([^,]*\\)|  - \\1@\\2 from: \\3|g"
+    echo "${all_dependencies}" | grep "${dup}," | sed 's|\([^,]*\),\([^,]*\),\([^,]*\),\([^,]*\)|  - \1@\2\3 from: \4|g'
   done
   if [[ -n "${duplicates}" ]]; then
     log_error "FAIL: inconsistent dependencies"

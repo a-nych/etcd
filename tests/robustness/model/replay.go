@@ -16,6 +16,7 @@ package model
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -35,14 +36,16 @@ func NewReplay(persistedRequests []EtcdRequest) *EtcdReplay {
 		state = newState
 	}
 	return &EtcdReplay{
+		Requests:            persistedRequests,
 		revisionToEtcdState: revisionToEtcdState,
-		Events:              events,
+		events:              events,
 	}
 }
 
 type EtcdReplay struct {
+	Requests            []EtcdRequest
 	revisionToEtcdState []EtcdState
-	Events              []PersistedEvent
+	events              []PersistedEvent
 }
 
 func (r *EtcdReplay) StateForRevision(revision int64) (EtcdState, error) {
@@ -53,7 +56,7 @@ func (r *EtcdReplay) StateForRevision(revision int64) (EtcdState, error) {
 }
 
 func (r *EtcdReplay) EventsForWatch(watch WatchRequest) (events []PersistedEvent) {
-	for _, e := range r.Events {
+	for _, e := range r.events {
 		if e.Revision < watch.Revision || !e.Match(watch) {
 			continue
 		}
@@ -63,44 +66,72 @@ func (r *EtcdReplay) EventsForWatch(watch WatchRequest) (events []PersistedEvent
 }
 
 func toWatchEvents(prevState *EtcdState, request EtcdRequest, response MaybeEtcdResponse) (events []PersistedEvent) {
-	if request.Type != Txn || response.Error != "" {
+	if response.Error != "" {
 		return events
 	}
-	var ops []EtcdOperation
-	if response.Txn.Failure {
-		ops = request.Txn.OperationsOnFailure
-	} else {
-		ops = request.Txn.OperationsOnSuccess
-	}
-	for _, op := range ops {
-		switch op.Type {
-		case RangeOperation:
-		case DeleteOperation:
-			e := PersistedEvent{
-				Event: Event{
-					Type: op.Type,
-					Key:  op.Delete.Key,
-				},
-				Revision: response.Revision,
-			}
-			if _, ok := prevState.KeyValues[op.Delete.Key]; ok {
+
+	switch request.Type {
+	case Txn:
+		var ops []EtcdOperation
+		if response.Txn.Failure {
+			ops = request.Txn.OperationsOnFailure
+		} else {
+			ops = request.Txn.OperationsOnSuccess
+		}
+		for _, op := range ops {
+			switch op.Type {
+			case RangeOperation:
+			case DeleteOperation:
+				e := PersistedEvent{
+					Event: Event{
+						Type: op.Type,
+						Key:  op.Delete.Key,
+					},
+					Revision: response.Revision,
+				}
+				if _, ok := prevState.KeyValues[op.Delete.Key]; ok {
+					events = append(events, e)
+				}
+			case PutOperation:
+				_, leaseExists := prevState.Leases[op.Put.LeaseID]
+				if op.Put.LeaseID != 0 && !leaseExists {
+					break
+				}
+
+				e := PersistedEvent{
+					Event: Event{
+						Type:  op.Type,
+						Key:   op.Put.Key,
+						Value: op.Put.Value,
+					},
+					Revision: response.Revision,
+				}
+				if _, ok := prevState.KeyValues[op.Put.Key]; !ok {
+					e.IsCreate = true
+				}
 				events = append(events, e)
+			default:
+				panic(fmt.Sprintf("unsupported operation type: %v", op))
 			}
-		case PutOperation:
+		}
+	case LeaseRevoke:
+		deletedKeys := []string{}
+		for key := range prevState.Leases[request.LeaseRevoke.LeaseID].Keys {
+			if _, ok := prevState.KeyValues[key]; ok {
+				deletedKeys = append(deletedKeys, key)
+			}
+		}
+
+		sort.Strings(deletedKeys)
+		for _, key := range deletedKeys {
 			e := PersistedEvent{
 				Event: Event{
-					Type:  op.Type,
-					Key:   op.Put.Key,
-					Value: op.Put.Value,
+					Type: DeleteOperation,
+					Key:  key,
 				},
 				Revision: response.Revision,
-			}
-			if _, ok := prevState.KeyValues[op.Put.Key]; !ok {
-				e.IsCreate = true
 			}
 			events = append(events, e)
-		default:
-			panic(fmt.Sprintf("unsupported operation type: %v", op))
 		}
 	}
 	return events

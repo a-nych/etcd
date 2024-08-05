@@ -34,6 +34,7 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
+	"go.etcd.io/etcd/client/pkg/v3/verify"
 	"go.etcd.io/etcd/client/v3/credentials"
 	"go.etcd.io/etcd/client/v3/internal/endpoint"
 	"go.etcd.io/etcd/client/v3/internal/resolver"
@@ -153,7 +154,7 @@ func (c *Client) Close() error {
 		c.Lease.Close()
 	}
 	if c.conn != nil {
-		return toErr(c.ctx, c.conn.Close())
+		return ContextError(c.ctx, c.conn.Close())
 	}
 	return c.ctx.Err()
 }
@@ -194,6 +195,13 @@ func (c *Client) Sync(ctx context.Context) error {
 			eps = append(eps, m.ClientURLs...)
 		}
 	}
+	// The linearizable `MemberList` returned successfully, so the
+	// endpoints shouldn't be empty.
+	verify.Verify(func() {
+		if len(eps) == 0 {
+			panic("empty endpoints returned from etcd cluster")
+		}
+	})
 	c.SetEndpoints(eps...)
 	c.lg.Debug("set etcd endpoints by autoSync", zap.Strings("endpoints", eps))
 	return nil
@@ -590,7 +598,9 @@ func isUnavailableErr(ctx context.Context, err error) bool {
 	return false
 }
 
-func toErr(ctx context.Context, err error) error {
+// ContextError converts the error into an EtcdError if the error message matches one of
+// the defined messages; otherwise, it tries to retrieve the context error.
+func ContextError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}

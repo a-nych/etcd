@@ -29,17 +29,19 @@ import (
 	"go.etcd.io/etcd/pkg/v3/stringutil"
 	"go.etcd.io/etcd/tests/v3/robustness/client"
 	"go.etcd.io/etcd/tests/v3/robustness/identity"
+	"go.etcd.io/etcd/tests/v3/robustness/random"
 )
 
 var (
-	Kubernetes = kubernetesTraffic{
+	Kubernetes Traffic = kubernetesTraffic{
 		averageKeyCount: 10,
 		resource:        "pods",
 		namespace:       "default",
-		writeChoices: []choiceWeight[KubernetesRequestType]{
-			{choice: KubernetesUpdate, weight: 90},
-			{choice: KubernetesDelete, weight: 5},
-			{choice: KubernetesCreate, weight: 5},
+		writeChoices: []random.ChoiceWeight[KubernetesRequestType]{
+			{Choice: KubernetesUpdate, Weight: 85},
+			{Choice: KubernetesDelete, Weight: 5},
+			{Choice: KubernetesCreate, Weight: 5},
+			{Choice: KubernetesCompact, Weight: 5},
 		},
 	}
 )
@@ -48,15 +50,26 @@ type kubernetesTraffic struct {
 	averageKeyCount int
 	resource        string
 	namespace       string
-	writeChoices    []choiceWeight[KubernetesRequestType]
+	writeChoices    []random.ChoiceWeight[KubernetesRequestType]
+}
+
+func (t kubernetesTraffic) WithoutCompact() Traffic {
+	wcs := make([]random.ChoiceWeight[KubernetesRequestType], 0, len(t.writeChoices))
+	for _, wc := range t.writeChoices {
+		if wc.Choice != KubernetesCompact {
+			wcs = append(wcs, wc)
+		}
+	}
+	return kubernetesTraffic{
+		averageKeyCount: t.averageKeyCount,
+		resource:        t.resource,
+		namespace:       t.namespace,
+		writeChoices:    wcs,
+	}
 }
 
 func (t kubernetesTraffic) ExpectUniqueRevision() bool {
 	return true
-}
-
-func (t kubernetesTraffic) Name() string {
-	return "Kubernetes"
 }
 
 func (t kubernetesTraffic) Run(ctx context.Context, c *client.RecordingClient, limiter *rate.Limiter, ids identity.Provider, lm identity.LeaseIDStorage, nonUniqueWriteLimiter ConcurrencyLimiter, finish <-chan struct{}) {
@@ -154,21 +167,27 @@ func (t kubernetesTraffic) Write(ctx context.Context, kc *kubernetesClient, ids 
 			_, err = kc.OptimisticDelete(writeCtx, key, rev)
 			nonUniqueWriteLimiter.Return()
 		} else {
+			shouldReturn := false
+
 			choices := t.writeChoices
-			if !nonUniqueWriteLimiter.Take() {
+			if shouldReturn = nonUniqueWriteLimiter.Take(); !shouldReturn {
 				choices = filterOutNonUniqueKubernetesWrites(t.writeChoices)
 			}
-			op := pickRandom(choices)
+			op := random.PickRandom(choices)
 			switch op {
 			case KubernetesDelete:
 				_, err = kc.OptimisticDelete(writeCtx, key, rev)
-				nonUniqueWriteLimiter.Return()
 			case KubernetesUpdate:
 				_, err = kc.OptimisticUpdate(writeCtx, key, fmt.Sprintf("%d", ids.NewRequestID()), rev)
 			case KubernetesCreate:
 				err = kc.OptimisticCreate(writeCtx, t.generateKey(), fmt.Sprintf("%d", ids.NewRequestID()))
+			case KubernetesCompact:
+				err = kc.Compact(writeCtx, rev)
 			default:
 				panic(fmt.Sprintf("invalid choice: %q", op))
+			}
+			if shouldReturn {
+				nonUniqueWriteLimiter.Return()
 			}
 		}
 	}
@@ -179,9 +198,9 @@ func (t kubernetesTraffic) Write(ctx context.Context, kc *kubernetesClient, ids 
 	return nil
 }
 
-func filterOutNonUniqueKubernetesWrites(choices []choiceWeight[KubernetesRequestType]) (resp []choiceWeight[KubernetesRequestType]) {
+func filterOutNonUniqueKubernetesWrites(choices []random.ChoiceWeight[KubernetesRequestType]) (resp []random.ChoiceWeight[KubernetesRequestType]) {
 	for _, choice := range choices {
-		if choice.choice != KubernetesDelete {
+		if choice.Choice != KubernetesDelete {
 			resp = append(resp, choice)
 		}
 	}
@@ -209,9 +228,10 @@ func (t kubernetesTraffic) generateKey() string {
 type KubernetesRequestType string
 
 const (
-	KubernetesDelete KubernetesRequestType = "delete"
-	KubernetesUpdate KubernetesRequestType = "update"
-	KubernetesCreate KubernetesRequestType = "create"
+	KubernetesDelete  KubernetesRequestType = "delete"
+	KubernetesUpdate  KubernetesRequestType = "update"
+	KubernetesCreate  KubernetesRequestType = "create"
+	KubernetesCompact KubernetesRequestType = "compact"
 )
 
 type kubernetesClient struct {
@@ -248,6 +268,11 @@ func (k kubernetesClient) RequestProgress(ctx context.Context) error {
 	// present in the cluster:
 	// https://github.com/kubernetes/kubernetes/blob/2016fab3085562b4132e6d3774b6ded5ba9939fd/staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go#L87
 	return k.client.RequestProgress(clientv3.WithRequireLeader(ctx))
+}
+
+func (k kubernetesClient) Compact(ctx context.Context, rev int64) error {
+	_, err := k.client.Compact(ctx, rev)
+	return err
 }
 
 // Kubernetes optimistically assumes that key didn't change since it was last observed, so it executes operations within a transaction conditioned on key not changing.

@@ -26,48 +26,66 @@ import (
 	"go.etcd.io/etcd/tests/v3/robustness/client"
 	"go.etcd.io/etcd/tests/v3/robustness/identity"
 	"go.etcd.io/etcd/tests/v3/robustness/model"
+	"go.etcd.io/etcd/tests/v3/robustness/random"
 )
 
 var (
-	EtcdPutDeleteLease = etcdTraffic{
+	EtcdPutDeleteLease Traffic = etcdTraffic{
 		keyCount:     10,
 		leaseTTL:     DefaultLeaseTTL,
 		largePutSize: 32769,
-		requests: []choiceWeight[etcdRequestType]{
-			{choice: Get, weight: 15},
-			{choice: List, weight: 15},
-			{choice: StaleGet, weight: 10},
-			{choice: StaleList, weight: 10},
-			{choice: Put, weight: 23},
-			{choice: LargePut, weight: 2},
-			{choice: Delete, weight: 5},
-			{choice: MultiOpTxn, weight: 5},
-			{choice: PutWithLease, weight: 5},
-			{choice: LeaseRevoke, weight: 5},
-			{choice: CompareAndSet, weight: 5},
+		requests: []random.ChoiceWeight[etcdRequestType]{
+			{Choice: Get, Weight: 15},
+			{Choice: List, Weight: 15},
+			{Choice: StaleGet, Weight: 10},
+			{Choice: StaleList, Weight: 10},
+			{Choice: Delete, Weight: 5},
+			{Choice: MultiOpTxn, Weight: 5},
+			{Choice: PutWithLease, Weight: 5},
+			{Choice: LeaseRevoke, Weight: 5},
+			{Choice: CompareAndSet, Weight: 5},
+			{Choice: Put, Weight: 15},
+			{Choice: LargePut, Weight: 5},
+			{Choice: Compact, Weight: 5},
 		},
 	}
-	EtcdPut = etcdTraffic{
+	EtcdPut Traffic = etcdTraffic{
 		keyCount:     10,
 		largePutSize: 32769,
 		leaseTTL:     DefaultLeaseTTL,
-		requests: []choiceWeight[etcdRequestType]{
-			{choice: Get, weight: 15},
-			{choice: List, weight: 15},
-			{choice: StaleGet, weight: 10},
-			{choice: StaleList, weight: 10},
-			{choice: Put, weight: 40},
-			{choice: MultiOpTxn, weight: 5},
-			{choice: LargePut, weight: 5},
+		requests: []random.ChoiceWeight[etcdRequestType]{
+			{Choice: Get, Weight: 15},
+			{Choice: List, Weight: 15},
+			{Choice: StaleGet, Weight: 10},
+			{Choice: StaleList, Weight: 10},
+			{Choice: MultiOpTxn, Weight: 5},
+			{Choice: LargePut, Weight: 5},
+			{Choice: Put, Weight: 35},
+			{Choice: Compact, Weight: 5},
 		},
 	}
 )
 
 type etcdTraffic struct {
 	keyCount     int
-	requests     []choiceWeight[etcdRequestType]
+	requests     []random.ChoiceWeight[etcdRequestType]
 	leaseTTL     int64
 	largePutSize int
+}
+
+func (t etcdTraffic) WithoutCompact() Traffic {
+	requests := make([]random.ChoiceWeight[etcdRequestType], 0, len(t.requests))
+	for _, request := range t.requests {
+		if request.Choice != Compact {
+			requests = append(requests, request)
+		}
+	}
+	return etcdTraffic{
+		keyCount:     t.keyCount,
+		requests:     requests,
+		leaseTTL:     t.leaseTTL,
+		largePutSize: t.largePutSize,
+	}
 }
 
 func (t etcdTraffic) ExpectUniqueRevision() bool {
@@ -89,6 +107,7 @@ const (
 	LeaseRevoke   etcdRequestType = "leaseRevoke"
 	CompareAndSet etcdRequestType = "compareAndSet"
 	Defragment    etcdRequestType = "defragment"
+	Compact       etcdRequestType = "compact"
 )
 
 func (t etcdTraffic) Name() string {
@@ -115,18 +134,20 @@ func (t etcdTraffic) Run(ctx context.Context, c *client.RecordingClient, limiter
 			return
 		default:
 		}
+		shouldReturn := false
+
 		// Avoid multiple failed writes in a row
 		if lastOperationSucceeded {
 			choices := t.requests
-			if !nonUniqueWriteLimiter.Take() {
+			if shouldReturn = nonUniqueWriteLimiter.Take(); !shouldReturn {
 				choices = filterOutNonUniqueEtcdWrites(choices)
 			}
-			requestType = pickRandom(choices)
+			requestType = random.PickRandom(choices)
 		} else {
 			requestType = Get
 		}
 		rev, err := client.Request(ctx, requestType, lastRev)
-		if requestType == Delete || requestType == LeaseRevoke {
+		if shouldReturn {
 			nonUniqueWriteLimiter.Return()
 		}
 		lastOperationSucceeded = err == nil
@@ -140,9 +161,9 @@ func (t etcdTraffic) Run(ctx context.Context, c *client.RecordingClient, limiter
 	}
 }
 
-func filterOutNonUniqueEtcdWrites(choices []choiceWeight[etcdRequestType]) (resp []choiceWeight[etcdRequestType]) {
+func filterOutNonUniqueEtcdWrites(choices []random.ChoiceWeight[etcdRequestType]) (resp []random.ChoiceWeight[etcdRequestType]) {
 	for _, choice := range choices {
-		if choice.choice != Delete && choice.choice != LeaseRevoke {
+		if choice.Choice != Delete && choice.Choice != LeaseRevoke {
 			resp = append(resp, choice)
 		}
 	}
@@ -188,7 +209,7 @@ func (c etcdTrafficClient) Request(ctx context.Context, request etcdRequestType,
 		}
 	case LargePut:
 		var resp *clientv3.PutResponse
-		resp, err = c.client.Put(opCtx, c.randomKey(), randString(c.largePutSize))
+		resp, err = c.client.Put(opCtx, c.randomKey(), random.RandString(c.largePutSize))
 		if resp != nil {
 			rev = resp.Header.Revision
 		}
@@ -261,6 +282,12 @@ func (c etcdTrafficClient) Request(ctx context.Context, request etcdRequestType,
 	case Defragment:
 		var resp *clientv3.DefragmentResponse
 		resp, err = c.client.Defragment(opCtx)
+		if resp != nil {
+			rev = resp.Header.Revision
+		}
+	case Compact:
+		var resp *clientv3.CompactResponse
+		resp, err = c.client.Compact(opCtx, lastRev)
 		if resp != nil {
 			rev = resp.Header.Revision
 		}

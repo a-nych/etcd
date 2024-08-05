@@ -228,6 +228,7 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 		ExperimentalMaxLearners:                       cfg.ExperimentalMaxLearners,
 		V2Deprecation:                                 cfg.V2DeprecationEffective(),
 		ExperimentalLocalAddress:                      cfg.InferLocalAddr(),
+		ServerFeatureGate:                             cfg.ServerFeatureGate,
 	}
 
 	if srvcfg.ExperimentalEnableDistributedTracing {
@@ -761,6 +762,7 @@ func (e *Etcd) serveClients() {
 			Timeout: e.cfg.GRPCKeepAliveTimeout,
 		}))
 	}
+	gopts = append(gopts, e.cfg.GRPCAdditionalServerOptions...)
 
 	splitHTTP := false
 	for _, sctx := range e.sctxs {
@@ -822,6 +824,24 @@ func (e *Etcd) pickGRPCGatewayServeContext(splitHTTP bool) *serveCtx {
 	panic("Expect at least one context able to serve grpc")
 }
 
+var ErrMissingClientTLSInfoForMetricsURL = errors.New("client TLS key/cert (--cert-file, --key-file) must be provided for metrics secure url")
+
+func (e *Etcd) createMetricsListener(murl url.URL) (net.Listener, error) {
+	tlsInfo := &e.cfg.ClientTLSInfo
+	switch murl.Scheme {
+	case "http":
+		tlsInfo = nil
+	case "https", "unixs":
+		if e.cfg.ClientTLSInfo.Empty() {
+			return nil, ErrMissingClientTLSInfoForMetricsURL
+		}
+	}
+	return transport.NewListenerWithOpts(murl.Host, murl.Scheme,
+		transport.WithTLSInfo(tlsInfo),
+		transport.WithSocketOpts(&e.cfg.SocketOpts),
+	)
+}
+
 func (e *Etcd) serveMetrics() (err error) {
 	if e.cfg.Metrics == "extensive" {
 		grpc_prometheus.EnableHandlingTimeHistogram()
@@ -833,14 +853,7 @@ func (e *Etcd) serveMetrics() (err error) {
 		etcdhttp.HandleHealth(e.cfg.logger, metricsMux, e.Server)
 
 		for _, murl := range e.cfg.ListenMetricsUrls {
-			tlsInfo := &e.cfg.ClientTLSInfo
-			if murl.Scheme == "http" {
-				tlsInfo = nil
-			}
-			ml, err := transport.NewListenerWithOpts(murl.Host, murl.Scheme,
-				transport.WithTLSInfo(tlsInfo),
-				transport.WithSocketOpts(&e.cfg.SocketOpts),
-			)
+			ml, err := e.createMetricsListener(murl)
 			if err != nil {
 				return err
 			}

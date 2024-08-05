@@ -49,11 +49,9 @@ func TestDataReports(t *testing.T) {
 			}
 			visualize := ValidateAndReturnVisualize(t, zaptest.NewLogger(t), Config{}, reports, persistedRequests, 5*time.Minute)
 
-			if t.Failed() {
-				err := visualize(filepath.Join(path, "history.html"))
-				if err != nil {
-					t.Fatal(err)
-				}
+			err = visualize(filepath.Join(path, "history.html"))
+			if err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
@@ -1334,6 +1332,34 @@ func TestValidateWatch(t *testing.T) {
 			},
 		},
 		{
+			name: "Reliable - issue #18089 - pass",
+			reports: []report.ClientReport{
+				{
+					Watch: []model.WatchOperation{
+						{
+							Request: model.WatchRequest{
+								WithPrefix: true,
+								Revision:   3,
+							},
+							Responses: []model.WatchResponse{
+								{
+									Events: []model.WatchEvent{
+										putWatchEvent("b", "2", 4, true),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			persistedRequests: []model.EtcdRequest{
+				putRequest("a", "1"),
+				deleteRequest("a"),
+				putRequest("b", "2"),
+				compactRequest(3),
+			},
+		},
+		{
 			name: "Resumable - watch revision from middle event - pass",
 			reports: []report.ClientReport{
 				{
@@ -1934,6 +1960,12 @@ func putRequest(key, value string) model.EtcdRequest {
 	}
 }
 
+func putRequestWithLease(key, value string, leaseID int64) model.EtcdRequest {
+	req := putRequest(key, value)
+	req.Txn.OperationsOnSuccess[0].Put.LeaseID = leaseID
+	return req
+}
+
 func deleteRequest(key string) model.EtcdRequest {
 	return model.EtcdRequest{
 		Type:        model.Txn,
@@ -1953,5 +1985,14 @@ func deleteRequest(key string) model.EtcdRequest {
 			OperationsOnFailure: nil,
 		},
 		Defragment: nil,
+	}
+}
+
+func compactRequest(revision int64) model.EtcdRequest {
+	return model.EtcdRequest{
+		Type: model.Compact,
+		Compact: &model.CompactRequest{
+			Revision: revision,
+		},
 	}
 }

@@ -18,12 +18,14 @@ package etcdmain
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
 	cconfig "go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
+	"go.etcd.io/etcd/server/v3/features"
 )
 
 var (
@@ -103,6 +105,8 @@ Member:
     Read timeout set on each rafthttp connection
   --raft-write-timeout '` + rafthttp.DefaultConnWriteTimeout.String() + `'
     Write timeout set on each rafthttp connection
+  --feature-gates ''
+    A set of key=value pairs that describe server level feature gates for alpha/experimental features. Options are:` + "\n    " + strings.Join(features.NewDefaultServerFeatureGate("", nil).KnownFeatures(), "\n    ") + `
 
 Clustering:
   --initial-advertise-peer-urls 'http://localhost:2380'
@@ -186,7 +190,7 @@ Security:
   --client-crl-file ''
     Path to the client certificate revocation list file.
   --client-cert-allowed-hostname ''
-    Allowed TLS hostname for client cert authentication.
+    Comma-separated list of SAN hostnames for client cert authentication.
   --trusted-ca-file ''
     Path to the client server TLS trusted CA cert file.
   --auto-tls 'false'
@@ -204,9 +208,9 @@ Security:
   --peer-trusted-ca-file ''
     Path to the peer server TLS trusted CA file.
   --peer-cert-allowed-cn ''
-    Required CN for client certs connecting to the peer endpoint.
+    Comma-separated list of allowed CNs for inter-peer TLS authentication.
   --peer-cert-allowed-hostname ''
-    Allowed TLS hostname for inter peer authentication.
+    Comma-separated list of allowed SAN hostnames for inter-peer TLS authentication.
   --peer-auto-tls 'false'
     Peer TLS using self-generated certificates if --peer-key-file and --peer-cert-file are not provided.
   --self-signed-cert-validity '1'
@@ -238,7 +242,7 @@ Profiling and Monitoring:
   --metrics 'basic'
     Set level of detail for exported metrics, specify 'extensive' to include server side grpc histogram metrics.
   --listen-metrics-urls ''
-    List of URLs to listen on for the metrics and health endpoints.
+    List of URLs to listen on for the /metrics and /health endpoints. For https, the client URL TLS info is used.
 
 Logging:
   --logger 'zap'

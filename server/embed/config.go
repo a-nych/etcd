@@ -30,7 +30,6 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
@@ -43,6 +42,7 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/featuregate"
 	"go.etcd.io/etcd/pkg/v3/flags"
 	"go.etcd.io/etcd/pkg/v3/netutil"
 	"go.etcd.io/etcd/server/v3/config"
@@ -51,6 +51,7 @@ import (
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3compactor"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
+	"go.etcd.io/etcd/server/v3/features"
 )
 
 const (
@@ -109,6 +110,8 @@ const (
 	maxElectionMs = 50000
 	// backend freelist map type
 	freelistArrayType = "array"
+
+	ServerFeatureGateFlagName = "feature-gates"
 )
 
 var (
@@ -285,6 +288,13 @@ type Config struct {
 	// before closing a non-responsive connection. 0 to disable.
 	GRPCKeepAliveTimeout time.Duration `json:"grpc-keepalive-timeout"`
 
+	// GRPCAdditionalServerOptions is the additional server option hook
+	// for changing the default internal gRPC configuration. Note these
+	// additional configurations take precedence over the existing individual
+	// configurations if present. Please refer to
+	// https://github.com/etcd-io/etcd/pull/14066#issuecomment-1248682996
+	GRPCAdditionalServerOptions []grpc.ServerOption `json:"grpc-additional-server-options"`
+
 	// SocketOpts are socket options passed to listener config.
 	SocketOpts transport.SocketOpts `json:"socket-options"`
 
@@ -449,6 +459,9 @@ type Config struct {
 
 	// V2Deprecation describes phase of API & Storage V2 support
 	V2Deprecation config.V2DeprecationEnum `json:"v2-deprecation"`
+
+	// ServerFeatureGate is a server level feature gate
+	ServerFeatureGate featuregate.FeatureGate
 }
 
 // configYAML holds the config suitable for yaml parsing
@@ -470,18 +483,20 @@ type configJSON struct {
 
 	ClientSecurityJSON securityConfig `json:"client-transport-security"`
 	PeerSecurityJSON   securityConfig `json:"peer-transport-security"`
+
+	ServerFeatureGatesJSON string `json:"feature-gates"`
 }
 
 type securityConfig struct {
-	CertFile        string `json:"cert-file"`
-	KeyFile         string `json:"key-file"`
-	ClientCertFile  string `json:"client-cert-file"`
-	ClientKeyFile   string `json:"client-key-file"`
-	CertAuth        bool   `json:"client-cert-auth"`
-	TrustedCAFile   string `json:"trusted-ca-file"`
-	AutoTLS         bool   `json:"auto-tls"`
-	AllowedCN       string `json:"allowed-cn"`
-	AllowedHostname string `json:"allowed-hostname"`
+	CertFile         string   `json:"cert-file"`
+	KeyFile          string   `json:"key-file"`
+	ClientCertFile   string   `json:"client-cert-file"`
+	ClientKeyFile    string   `json:"client-key-file"`
+	CertAuth         bool     `json:"client-cert-auth"`
+	TrustedCAFile    string   `json:"trusted-ca-file"`
+	AutoTLS          bool     `json:"auto-tls"`
+	AllowedCNs       []string `json:"allowed-cn"`
+	AllowedHostnames []string `json:"allowed-hostname"`
 }
 
 // NewConfig creates a new Config populated with default values.
@@ -570,6 +585,7 @@ func NewConfig() *Config {
 		},
 
 		AutoCompactionMode: DefaultAutoCompactionMode,
+		ServerFeatureGate:  features.NewDefaultServerFeatureGate(DefaultName, nil),
 	}
 	cfg.InitialCluster = cfg.InitialClusterFromName(cfg.Name)
 	return cfg
@@ -672,7 +688,7 @@ func (cfg *Config) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&cfg.ClientTLSInfo.ClientKeyFile, "client-key-file", "", "Path to an explicit peer client TLS key file otherwise key file will be used when client auth is required.")
 	fs.BoolVar(&cfg.ClientTLSInfo.ClientCertAuth, "client-cert-auth", false, "Enable client cert authentication.")
 	fs.StringVar(&cfg.ClientTLSInfo.CRLFile, "client-crl-file", "", "Path to the client certificate revocation list file.")
-	fs.StringVar(&cfg.ClientTLSInfo.AllowedHostname, "client-cert-allowed-hostname", "", "Allowed TLS hostname for client cert authentication.")
+	fs.Var(flags.NewStringsValue(""), "client-cert-allowed-hostname", "Comma-separated list of allowed SAN hostnames for client cert authentication.")
 	fs.StringVar(&cfg.ClientTLSInfo.TrustedCAFile, "trusted-ca-file", "", "Path to the client server TLS trusted CA cert file.")
 	fs.BoolVar(&cfg.ClientAutoTLS, "auto-tls", false, "Client TLS using generated certificates")
 	fs.StringVar(&cfg.PeerTLSInfo.CertFile, "peer-cert-file", "", "Path to the peer server TLS cert file.")
@@ -684,8 +700,8 @@ func (cfg *Config) AddFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&cfg.PeerAutoTLS, "peer-auto-tls", false, "Peer TLS using generated certificates")
 	fs.UintVar(&cfg.SelfSignedCertValidity, "self-signed-cert-validity", 1, "The validity period of the client and peer certificates, unit is year")
 	fs.StringVar(&cfg.PeerTLSInfo.CRLFile, "peer-crl-file", "", "Path to the peer certificate revocation list file.")
-	fs.StringVar(&cfg.PeerTLSInfo.AllowedCN, "peer-cert-allowed-cn", "", "Allowed CN for inter peer authentication.")
-	fs.StringVar(&cfg.PeerTLSInfo.AllowedHostname, "peer-cert-allowed-hostname", "", "Allowed TLS hostname for inter peer authentication.")
+	fs.Var(flags.NewStringsValue(""), "peer-cert-allowed-cn", "Comma-separated list of allowed CNs for inter-peer TLS authentication.")
+	fs.Var(flags.NewStringsValue(""), "peer-cert-allowed-hostname", "Comma-separated list of allowed SAN hostnames for inter-peer TLS authentication.")
 	fs.Var(flags.NewStringsValue(""), "cipher-suites", "Comma-separated list of supported TLS cipher suites between client/server and peers (empty will be auto-populated by Go).")
 	fs.BoolVar(&cfg.PeerTLSInfo.SkipClientSANVerify, "experimental-peer-skip-client-san-verification", false, "Skip verification of SAN field in client certificate for peer connections.")
 	fs.StringVar(&cfg.TlsMinVersion, "tls-min-version", string(tlsutil.TLSVersion12), "Minimum TLS version supported by etcd. Possible values: TLS1.2, TLS1.3.")
@@ -756,6 +772,9 @@ func (cfg *Config) AddFlags(fs *flag.FlagSet) {
 	// unsafe
 	fs.BoolVar(&cfg.UnsafeNoFsync, "unsafe-no-fsync", false, "Disables fsync, unsafe, will cause data loss.")
 	fs.BoolVar(&cfg.ForceNewCluster, "force-new-cluster", false, "Force to create a new one member cluster.")
+
+	// featuregate
+	cfg.ServerFeatureGate.(featuregate.MutableFeatureGate).AddFlag(fs, ServerFeatureGateFlagName)
 }
 
 func ConfigFromFile(path string) (*Config, error) {
@@ -777,6 +796,13 @@ func (cfg *configYAML) configFromFile(path string) error {
 	err = yaml.Unmarshal(b, cfg)
 	if err != nil {
 		return err
+	}
+
+	if cfg.configJSON.ServerFeatureGatesJSON != "" {
+		err = cfg.Config.ServerFeatureGate.(featuregate.MutableFeatureGate).Set(cfg.configJSON.ServerFeatureGatesJSON)
+		if err != nil {
+			return err
+		}
 	}
 
 	if cfg.configJSON.ListenPeerURLs != "" {
@@ -858,8 +884,8 @@ func (cfg *configYAML) configFromFile(path string) error {
 		tls.ClientKeyFile = ysc.ClientKeyFile
 		tls.ClientCertAuth = ysc.CertAuth
 		tls.TrustedCAFile = ysc.TrustedCAFile
-		tls.AllowedCN = ysc.AllowedCN
-		tls.AllowedHostname = ysc.AllowedHostname
+		tls.AllowedCNs = ysc.AllowedCNs
+		tls.AllowedHostnames = ysc.AllowedHostnames
 	}
 	copySecurityDetails(&cfg.ClientTLSInfo, &cfg.ClientSecurityJSON)
 	copySecurityDetails(&cfg.PeerTLSInfo, &cfg.PeerSecurityJSON)
@@ -1140,7 +1166,7 @@ func (cfg *Config) GetDNSClusterNames() ([]string, error) {
 		zap.Error(httpCerr),
 	)
 
-	return clusterStrs, multierr.Combine(cerr, httpCerr)
+	return clusterStrs, errors.Join(cerr, httpCerr)
 }
 
 func (cfg *Config) InitialClusterFromName(name string) (ret string) {
